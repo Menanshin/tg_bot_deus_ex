@@ -1,25 +1,21 @@
-# telegram_public_commentary_bot v3.6
-# Перевод конфигурации в .env-файл (безопасный подход)
+# telegram_public_commentary_bot v3.6 — polling edition
 
 import logging
-from flask import Flask, request
 from telegram import Update, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import openai
 import os
 import json
 import datetime
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения из .env
+# Загрузка переменных окружения
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 
-bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot=bot, update_queue=None, use_context=True)
 openai.api_key = OPENAI_API_KEY
 
 post_log = []
@@ -27,16 +23,12 @@ channel_stats = {}
 whitelist_gpt4 = set()
 username_to_id = {}
 
-# Сохраняем whitelist в файл
-
 def save_whitelist():
     try:
         with open("whitelist.json", "w", encoding="utf-8") as f:
             json.dump({"gpt4_whitelist": list(whitelist_gpt4), "username_map": username_to_id}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logging.error(f"Ошибка при сохранении whitelist: {e}")
-
-# Генерация комментария
 
 def generate_ai_comment(post_text, use_gpt4=False):
     model = "gpt-4" if use_gpt4 else "gpt-3.5-turbo"
@@ -57,9 +49,7 @@ def generate_ai_comment(post_text, use_gpt4=False):
         logging.error(f"AI comment error: {e}")
         return "(Комментарий не сгенерирован)"
 
-# Обработка постов
-
-def handle_post(update: Update, context):
+def handle_post(update: Update, context: CallbackContext):
     text = update.message.text
     chat = update.message.chat
     chat_id = chat.id
@@ -84,8 +74,6 @@ def handle_post(update: Update, context):
         "model": channel_stats[chat_id]["model"]
     })
 
-# Отчёт по активности
-
 def send_weekly_report_for_chat(chat_id):
     relevant = [p for p in post_log if p["chat_id"] == chat_id]
     if not relevant:
@@ -96,12 +84,10 @@ def send_weekly_report_for_chat(chat_id):
     bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename,
                       caption="Ваш еженедельный отчёт. Вы можете отправить этот файл создателю бота (@menanshin) для анализа контента и рекомендаций.")
 
-# Команды
-
-def report(update: Update, context):
+def report(update: Update, context: CallbackContext):
     send_weekly_report_for_chat(update.message.chat.id)
 
-def status(update: Update, context):
+def status(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
         return
     if not channel_stats:
@@ -112,7 +98,7 @@ def status(update: Update, context):
         text += f"\nКанал {cid}: {data['count']} комментариев, модель: {data['model']}"
     update.message.reply_text(text)
 
-def allow(update: Update, context):
+def allow(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
         return
     if not context.args:
@@ -136,7 +122,7 @@ def allow(update: Update, context):
         except:
             update.message.reply_text("Ошибка: некорректный ID")
 
-def remove(update: Update, context):
+def remove(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
         return
     if not context.args:
@@ -163,35 +149,25 @@ def remove(update: Update, context):
         except:
             update.message.reply_text("Ошибка: некорректный ID")
 
-def dump_whitelist(update: Update, context):
+def dump_whitelist(update: Update, context: CallbackContext):
     if update.message.from_user.id == OWNER_ID:
         try:
             update.message.reply_document(document=open("whitelist.json", "rb"), filename="whitelist.json")
         except:
             update.message.reply_text("Файл whitelist.json не найден.")
 
-# Flask
-app = Flask(__name__)
-
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok"
-
-@app.route("/")
-def index():
-    return "\u2705 Бот работает."
-
-# Регистрация
-
-dispatcher.add_handler(CommandHandler("report", report))
-dispatcher.add_handler(CommandHandler("status", status))
-dispatcher.add_handler(CommandHandler("allow", allow))
-dispatcher.add_handler(CommandHandler("remove", remove))
-dispatcher.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
-
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    app.run(host='0.0.0.0', port=5000)
+
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("report", report))
+    dp.add_handler(CommandHandler("status", status))
+    dp.add_handler(CommandHandler("allow", allow))
+    dp.add_handler(CommandHandler("remove", remove))
+    dp.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
+
+    updater.start_polling()
+    updater.idle()
