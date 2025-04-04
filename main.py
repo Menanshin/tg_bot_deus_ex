@@ -159,15 +159,22 @@ def dump_whitelist(update: Update, context: CallbackContext):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    try:
+        print("Запускаю бота...")
 
-    dp.add_handler(CommandHandler("report", report))
-    dp.add_handler(CommandHandler("status", status))
-    dp.add_handler(CommandHandler("allow", allow))
-    dp.add_handler(CommandHandler("remove", remove))
-    dp.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
+        updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+        dp = updater.dispatcher
 
-    updater.start_polling()
-    updater.idle()
+        dp.add_handler(CommandHandler("report", report))
+        dp.add_handler(CommandHandler("status", status))
+        dp.add_handler(CommandHandler("allow", allow))
+        dp.add_handler(CommandHandler("remove", remove))
+        dp.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
+
+        updater.start_polling()
+        print("Бот успешно запущен (polling).")
+        updater.idle()
+
+    except Exception as e:
+        print("❌ Ошибка при запуске бота:", e)
