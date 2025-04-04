@@ -109,9 +109,14 @@ def status(update: Update, context: CallbackContext):
     if not channel_stats:
         update.message.reply_text("Нет данных по активности.")
         return
+
+    # Инвертируем словарь: {chat_id: username}
+    id_to_username = {v: k for k, v in username_to_id.items()}
+
     text = "Статистика по каналам:\n"
     for cid, data in channel_stats.items():
-        text += f"\nКанал {cid}: {data['count']} комментариев, модель: {data['model']}"
+        username = id_to_username.get(cid, f"(ID {cid})")
+        text += f"\n{username}: {data['count']} комментариев, модель: {data['model']}"
     update.message.reply_text(text)
 
 def allow(update: Update, context: CallbackContext):
