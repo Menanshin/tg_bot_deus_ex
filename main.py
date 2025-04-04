@@ -167,6 +167,19 @@ if __name__ == '__main__':
         updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
         dp = updater.dispatcher
 
+        # Регистрируем команды
+        from telegram import BotCommand
+
+        commands = [
+            BotCommand("status", "Показать статистику"),
+            BotCommand("report", "Отчёт по активности"),
+            BotCommand("allow", "Добавить канал в whitelist GPT-4"),
+            BotCommand("remove", "Убрать канал из whitelist GPT-4"),
+            BotCommand("dump_whitelist", "Скачать whitelist"),
+        ]
+        updater.bot.set_my_commands(commands)
+
+        # Обработчики
         dp.add_handler(CommandHandler("report", report))
         dp.add_handler(CommandHandler("status", status))
         dp.add_handler(CommandHandler("allow", allow))
@@ -174,8 +187,8 @@ if __name__ == '__main__':
         dp.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
         dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
 
+        logging.info("Бот успешно запущен (polling).")
         updater.start_polling()
-        print("Бот успешно запущен (polling).")
         updater.idle()
 
     except Exception as e:
