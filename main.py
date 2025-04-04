@@ -63,6 +63,34 @@ def generate_ai_comment(post_text, use_gpt4=False):
         logging.error(f" Ошибка генерации комментария через OpenAI ({model}): {e}")
         return "(Комментарий не сгенерирован)"
 
+def handle_post(update: Update, context: CallbackContext):
+    if update.message.chat.type != "channel":
+        return  # Игнорируем всё, кроме каналов
+
+    text = update.message.text
+    chat = update.message.chat
+    chat_id = chat.id
+    username = chat.username
+
+    if username:
+        username_to_id[f"@{username.lower()}"] = chat_id
+
+    use_gpt4 = chat_id in whitelist_gpt4
+    comment = generate_ai_comment(text, use_gpt4=use_gpt4)
+    update.message.reply_text(comment)
+
+    channel_stats.setdefault(chat_id, {"count": 0, "model": "gpt-4" if use_gpt4 else "gpt-3.5-turbo"})
+    channel_stats[chat_id]["count"] += 1
+
+    post_log.append({
+        "timestamp": str(datetime.datetime.now()),
+        "chat_id": chat_id,
+        "username": username,
+        "original": text,
+        "comment": comment,
+        "model": channel_stats[chat_id]["model"]
+    })
+
 
 def handle_post(update: Update, context: CallbackContext):
     text = update.message.text
