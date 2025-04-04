@@ -1,4 +1,4 @@
-# Базовый образ с Python
+# Используем официальный образ Python
 FROM python:3.11-slim
 
 # Устанавливаем системные зависимости
@@ -6,18 +6,20 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Устанавливаем рабочую директорию
+# Устанавливаем рабочую директорию внутри контейнера
 WORKDIR /app
 
-# Копируем зависимости и устанавливаем их
+# Копируем зависимости
 COPY requirements.txt .
+
+# Устанавливаем Python-зависимости
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Копируем весь проект внутрь контейнера
+# Копируем всё остальное
 COPY . .
 
-# Открываем порт (если ты планируешь Flask-интерфейс)
+# Flask слушает на 5000 порту
 EXPOSE 5000
 
-# Точка входа
+# Запуск приложения
 CMD ["python", "main.py"]
