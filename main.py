@@ -41,14 +41,23 @@ def generate_ai_comment(post_text, use_gpt4=False):
         {"role": "user", "content": post_text}
     ]
     try:
+        # Логируем, какой ключ и модель используются
+        logging.info(f"Запрос к OpenAI: модель={model}, ключ={OPENAI_API_KEY[:8]}...")
+
+        # Проверка подключения: можно пинговать список моделей (опционально)
+        # openai.Model.list()
+
+        # Основной вызов
         response = openai.ChatCompletion.create(
             model=model,
             messages=messages
         )
         return response.choices[0].message.content.strip()
+
     except Exception as e:
-        logging.error(f"AI comment error: {e}")
+        logging.error(f"Ошибка генерации комментария через OpenAI ({model}): {e}")
         return "(Комментарий не сгенерирован)"
+
 
 def handle_post(update: Update, context: CallbackContext):
     text = update.message.text
