@@ -74,18 +74,19 @@ def handle_post(update: Update, context: CallbackContext):
         "model": channel_stats[chat_id]["model"]
     })
 
-def send_weekly_report_for_chat(chat_id):
+def send_weekly_report_for_chat(chat_id, context: CallbackContext):
     relevant = [p for p in post_log if p["chat_id"] == chat_id]
     if not relevant:
         return
     filename = f"weekly_report_{chat_id}_{datetime.datetime.now().strftime('%Y%m%d')}.json"
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(relevant, f, ensure_ascii=False, indent=2)
-    bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename,
-                      caption="Ваш еженедельный отчёт. Вы можете отправить этот файл создателю бота (@menanshin) для анализа контента и рекомендаций.")
+    context.bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename,
+                              caption="Ваш еженедельный отчёт. Вы можете отправить этот файл создателю бота (@menanshin) для анализа контента и рекомендаций.")
 
 def report(update: Update, context: CallbackContext):
-    send_weekly_report_for_chat(update.message.chat.id)
+    send_weekly_report_for_chat(update.message.chat.id, context)
+
 
 def status(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
