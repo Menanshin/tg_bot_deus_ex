@@ -1,31 +1,34 @@
-# telegram_public_commentary_bot v3.6 — polling edition
-from openai import OpenAI
-
-print("main.py ЗАПУЩЕН ")
-
 import logging
-from telegram import Update, Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import openai
 import os
 import json
 import datetime
+
+from flask import Flask, request
 from dotenv import load_dotenv
+from telegram import Update, Bot, BotCommand
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from openai import OpenAI
 
-# Загрузка переменных окружения
+# === Загрузка переменных окружения ===
 load_dotenv()
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 
-openai.api_key = OPENAI_API_KEY
+# === Инициализация ===
+bot = Bot(token=TELEGRAM_TOKEN)
+client = OpenAI(api_key=OPENAI_API_KEY)
+dispatcher = Dispatcher(bot, None, workers=2, use_context=True)
 
 post_log = []
 channel_stats = {}
 whitelist_gpt4 = set()
 username_to_id = {}
 
+# === Flask-приложение ===
+app = Flask(__name__)
+
+# === Вспомогательные функции ===
 def save_whitelist():
     try:
         with open("whitelist.json", "w", encoding="utf-8") as f:
@@ -35,7 +38,6 @@ def save_whitelist():
 
 def generate_ai_comment(post_text, use_gpt4=False):
     model = "gpt-4" if use_gpt4 else "gpt-3.5-turbo"
-
     messages = [
         {"role": "system", "content": (
             "Ты ИИ-комментатор. Комментируй посты точно и глубоко. Уточняй ошибки, предлагай улучшения, расшифровывай медиа по описанию. "
@@ -43,29 +45,17 @@ def generate_ai_comment(post_text, use_gpt4=False):
         )},
         {"role": "user", "content": post_text}
     ]
-
     try:
-        # Инициализация клиента OpenAI (новый стиль)
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        # Логируем ключ и модель (безопасно, только первые символы ключа)
-        logging.info(f"🔁 Запрос к OpenAI: модель={model}, ключ={OPENAI_API_KEY[:8]}...")
-
-        # Выполнение запроса
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages
-        )
-
+        response = client.chat.completions.create(model=model, messages=messages)
         return response.choices[0].message.content.strip()
-
     except Exception as e:
-        logging.error(f" Ошибка генерации комментария через OpenAI ({model}): {e}")
+        logging.error(f"Ошибка генерации комментария ({model}): {e}")
         return "(Комментарий не сгенерирован)"
 
+# === Обработчики ===
 def handle_post(update: Update, context: CallbackContext):
     if update.message.chat.type != "channel":
-        return  # Игнорируем всё, кроме каналов
+        return
 
     text = update.message.text
     chat = update.message.chat
@@ -77,7 +67,7 @@ def handle_post(update: Update, context: CallbackContext):
 
     use_gpt4 = chat_id in whitelist_gpt4
     comment = generate_ai_comment(text, use_gpt4=use_gpt4)
-    update.message.reply_text(comment)
+    bot.send_message(chat_id=chat_id, text=comment)
 
     channel_stats.setdefault(chat_id, {"count": 0, "model": "gpt-4" if use_gpt4 else "gpt-3.5-turbo"})
     channel_stats[chat_id]["count"] += 1
@@ -91,45 +81,17 @@ def handle_post(update: Update, context: CallbackContext):
         "model": channel_stats[chat_id]["model"]
     })
 
+def report(update: Update, context: CallbackContext):
+    send_weekly_report_for_chat(update.message.chat.id, context)
 
-def handle_post(update: Update, context: CallbackContext):
-    text = update.message.text
-    chat = update.message.chat
-    chat_id = chat.id
-    username = chat.username
-
-    if username:
-        username_to_id[f"@{username.lower()}"] = chat_id
-
-    use_gpt4 = chat_id in whitelist_gpt4
-    comment = generate_ai_comment(text, use_gpt4=use_gpt4)
-    update.message.reply_text(comment)
-
-    channel_stats.setdefault(chat_id, {"count": 0, "model": "gpt-4" if use_gpt4 else "gpt-3.5-turbo"})
-    channel_stats[chat_id]["count"] += 1
-
-    post_log.append({
-        "timestamp": str(datetime.datetime.now()),
-        "chat_id": chat_id,
-        "username": username,
-        "original": text,
-        "comment": comment,
-        "model": channel_stats[chat_id]["model"]
-    })
-
-def send_weekly_report_for_chat(chat_id, context: CallbackContext):
+def send_weekly_report_for_chat(chat_id, context):
     relevant = [p for p in post_log if p["chat_id"] == chat_id]
     if not relevant:
         return
     filename = f"weekly_report_{chat_id}_{datetime.datetime.now().strftime('%Y%m%d')}.json"
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(relevant, f, ensure_ascii=False, indent=2)
-    context.bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename,
-                              caption="Ваш еженедельный отчёт. Вы можете отправить этот файл в Chat-GPT для анализа контента и рекомендаций.")
-
-def report(update: Update, context: CallbackContext):
-    send_weekly_report_for_chat(update.message.chat.id, context)
-
+    context.bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename)
 
 def status(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -137,10 +99,7 @@ def status(update: Update, context: CallbackContext):
     if not channel_stats:
         update.message.reply_text("Нет данных по активности.")
         return
-
-    # Инвертируем словарь: {chat_id: username}
     id_to_username = {v: k for k, v in username_to_id.items()}
-
     text = "Статистика по каналам:\n"
     for cid, data in channel_stats.items():
         username = id_to_username.get(cid, f"(ID {cid})")
@@ -151,92 +110,69 @@ def allow(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
         return
     if not context.args:
-        update.message.reply_text("Укажи username или chat_id: /allow @channel_username или /allow 123456")
+        update.message.reply_text("Укажи username или chat_id")
         return
     target = context.args[0]
-    if target.startswith("@"):
+    if target.startswith("@"):  # username
         chat_id = username_to_id.get(target.lower())
         if chat_id:
             whitelist_gpt4.add(chat_id)
             save_whitelist()
-            update.message.reply_text(f"Канал {target} ({chat_id}) добавлен в whitelist GPT-4")
-        else:
-            update.message.reply_text(f"Канал {target} не найден. Убедись, что бот был добавлен и активен в этом канале.")
+            update.message.reply_text(f"Канал {target} добавлен в whitelist")
     else:
         try:
             chat_id = int(target)
             whitelist_gpt4.add(chat_id)
             save_whitelist()
-            update.message.reply_text(f"Канал {chat_id} добавлен в whitelist GPT-4")
+            update.message.reply_text(f"Канал {chat_id} добавлен в whitelist")
         except:
-            update.message.reply_text("Ошибка: некорректный ID")
+            update.message.reply_text("Некорректный ID")
 
 def remove(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
         return
     if not context.args:
-        update.message.reply_text("Укажи username или chat_id: /remove @channel_username или /remove 123456")
+        update.message.reply_text("Укажи username или chat_id")
         return
     target = context.args[0]
-    if target.startswith("@"):
-        chat_id = username_to_id.get(target.lower())
+    try:
+        chat_id = int(target) if not target.startswith("@") else username_to_id.get(target.lower())
         if chat_id and chat_id in whitelist_gpt4:
             whitelist_gpt4.remove(chat_id)
             save_whitelist()
-            update.message.reply_text(f"Канал {target} удалён из whitelist GPT-4")
+            update.message.reply_text(f"Канал {target} удалён из whitelist")
         else:
-            update.message.reply_text(f"Канал {target} не найден в whitelist")
-    else:
-        try:
-            chat_id = int(target)
-            if chat_id in whitelist_gpt4:
-                whitelist_gpt4.remove(chat_id)
-                save_whitelist()
-                update.message.reply_text(f"Канал {chat_id} удалён из whitelist GPT-4")
-            else:
-                update.message.reply_text("Этот канал не находится в whitelist")
-        except:
-            update.message.reply_text("Ошибка: некорректный ID")
+            update.message.reply_text("Канал не найден или не в whitelist")
+    except:
+        update.message.reply_text("Ошибка")
 
 def dump_whitelist(update: Update, context: CallbackContext):
     if update.message.from_user.id == OWNER_ID:
         try:
-            update.message.reply_document(document=open("whitelist.json", "rb"), filename="whitelist.json")
+            update.message.reply_document(document=open("whitelist.json", "rb"))
         except:
-            update.message.reply_text("Файл whitelist.json не найден.")
+            update.message.reply_text("Файл не найден.")
 
+# === Регистрируем обработчики ===
+dispatcher.add_handler(CommandHandler("report", report))
+dispatcher.add_handler(CommandHandler("status", status))
+dispatcher.add_handler(CommandHandler("allow", allow))
+dispatcher.add_handler(CommandHandler("remove", remove))
+dispatcher.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
+
+# === Flask routes ===
+@app.route("/", methods=["GET"])
+def index():
+    return "\u2705 Бот работает."
+
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
+
+# === Запуск ===
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-
-    try:
-        print("Запускаю бота...")
-
-        updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-        dp = updater.dispatcher
-
-        # Регистрируем команды
-        from telegram import BotCommand
-
-        commands = [
-            BotCommand("status", "Показать статистику"),
-            BotCommand("report", "Отчёт по активности"),
-            BotCommand("allow", "Добавить канал в whitelist GPT-4"),
-            BotCommand("remove", "Убрать канал из whitelist GPT-4"),
-            BotCommand("dump_whitelist", "Скачать whitelist"),
-        ]
-        updater.bot.set_my_commands(commands)
-
-        # Обработчики
-        dp.add_handler(CommandHandler("report", report))
-        dp.add_handler(CommandHandler("status", status))
-        dp.add_handler(CommandHandler("allow", allow))
-        dp.add_handler(CommandHandler("remove", remove))
-        dp.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
-
-        logging.info("Бот успешно запущен (polling).")
-        updater.start_polling()
-        updater.idle()
-
-    except Exception as e:
-        print("Ошибка при запуске бота:", e)
+    app.run(host='0.0.0.0', port=5000)
