@@ -1,4 +1,5 @@
 # telegram_public_commentary_bot v3.6 — polling edition
+print("🔥 main.py ЗАПУЩЕН 🔥")
 
 import logging
 from telegram import Update, Bot
@@ -82,7 +83,7 @@ def send_weekly_report_for_chat(chat_id, context: CallbackContext):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(relevant, f, ensure_ascii=False, indent=2)
     context.bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename,
-                              caption="Ваш еженедельный отчёт. Вы можете отправить этот файл создателю бота (@menanshin) для анализа контента и рекомендаций.")
+                              caption="Ваш еженедельный отчёт. Вы можете отправить этот файл в Chat-GPT для анализа контента и рекомендаций.")
 
 def report(update: Update, context: CallbackContext):
     send_weekly_report_for_chat(update.message.chat.id, context)
