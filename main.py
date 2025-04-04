@@ -1,5 +1,5 @@
 # telegram_public_commentary_bot v3.6 — polling edition
-print("🔥 main.py ЗАПУЩЕН 🔥")
+print("main.py ЗАПУЩЕН ")
 
 import logging
 from telegram import Update, Bot
@@ -179,4 +179,4 @@ if __name__ == '__main__':
         updater.idle()
 
     except Exception as e:
-        print("❌ Ошибка при запуске бота:", e)
+        print("Ошибка при запуске бота:", e)
