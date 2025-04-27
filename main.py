@@ -1,13 +1,19 @@
+import datetime
+import json
 import logging
 import os
-import json
-import datetime
 
-from flask import Flask, request
 from dotenv import load_dotenv
-from telegram import Update, Bot, BotCommand
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from flask import Flask, request
 from openai import OpenAI
+from telegram import Bot, Update  # BotCommand, Update
+from telegram.ext import (
+    CallbackContext,
+    CommandHandler,
+    Dispatcher,
+    Filters,
+    MessageHandler,
+)
 
 # === Загрузка переменных окружения ===
 load_dotenv()
@@ -28,22 +34,37 @@ username_to_id = {}
 # === Flask-приложение ===
 app = Flask(__name__)
 
+
 # === Вспомогательные функции ===
 def save_whitelist():
     try:
         with open("whitelist.json", "w", encoding="utf-8") as f:
-            json.dump({"gpt4_whitelist": list(whitelist_gpt4), "username_map": username_to_id}, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {
+                    "gpt4_whitelist": list(whitelist_gpt4),
+                    "username_map": username_to_id,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
     except Exception as e:
         logging.error(f"Ошибка при сохранении whitelist: {e}")
+
 
 def generate_ai_comment(post_text, use_gpt4=False):
     model = "gpt-4" if use_gpt4 else "gpt-3.5-turbo"
     messages = [
-        {"role": "system", "content": (
-            "Ты ИИ-комментатор. Комментируй посты точно и глубоко. Уточняй ошибки, предлагай улучшения, расшифровывай медиа по описанию. "
-            "Заверши каждый комментарий строкой: 'Если у вас есть вопросы о моей работе, то обратитесь к моему создателю @menanshin'"
-        )},
-        {"role": "user", "content": post_text}
+        {
+            "role": "system",
+            "content": (
+                "Ты ИИ-комментатор. Комментируй посты точно и глубоко. "
+                "Уточняй ошибки, предлагай улучшения, расшифровывай медиа по описанию. "
+                "Заверши каждый комментарий строкой: "
+                "'Есть вопросы о моей работе? Обратитесь к моему создателю @menanshin'"
+            ),
+        },
+        {"role": "user", "content": post_text},
     ]
     try:
         response = client.chat.completions.create(model=model, messages=messages)
@@ -51,6 +72,7 @@ def generate_ai_comment(post_text, use_gpt4=False):
     except Exception as e:
         logging.error(f"Ошибка генерации комментария ({model}): {e}")
         return "(Комментарий не сгенерирован)"
+
 
 # === Обработчики ===
 def handle_post(update: Update, context: CallbackContext):
@@ -69,29 +91,40 @@ def handle_post(update: Update, context: CallbackContext):
     comment = generate_ai_comment(text, use_gpt4=use_gpt4)
     bot.send_message(chat_id=chat_id, text=comment)
 
-    channel_stats.setdefault(chat_id, {"count": 0, "model": "gpt-4" if use_gpt4 else "gpt-3.5-turbo"})
+    channel_stats.setdefault(
+        chat_id, {"count": 0, "model": "gpt-4" if use_gpt4 else "gpt-3.5-turbo"}
+    )
     channel_stats[chat_id]["count"] += 1
 
-    post_log.append({
-        "timestamp": str(datetime.datetime.now()),
-        "chat_id": chat_id,
-        "username": username,
-        "original": text,
-        "comment": comment,
-        "model": channel_stats[chat_id]["model"]
-    })
+    post_log.append(
+        {
+            "timestamp": str(datetime.datetime.now()),
+            "chat_id": chat_id,
+            "username": username,
+            "original": text,
+            "comment": comment,
+            "model": channel_stats[chat_id]["model"],
+        }
+    )
+
 
 def report(update: Update, context: CallbackContext):
     send_weekly_report_for_chat(update.message.chat.id, context)
+
 
 def send_weekly_report_for_chat(chat_id, context):
     relevant = [p for p in post_log if p["chat_id"] == chat_id]
     if not relevant:
         return
-    filename = f"weekly_report_{chat_id}_{datetime.datetime.now().strftime('%Y%m%d')}.json"
+    filename = (
+        f"weekly_report_{chat_id}_{datetime.datetime.now().strftime('%Y%m%d')}.json"
+    )
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(relevant, f, ensure_ascii=False, indent=2)
-    context.bot.send_document(chat_id=chat_id, document=open(filename, "rb"), filename=filename)
+    context.bot.send_document(
+        chat_id=chat_id, document=open(filename, "rb"), filename=filename
+    )
+
 
 def status(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -105,6 +138,7 @@ def status(update: Update, context: CallbackContext):
         username = id_to_username.get(cid, f"(ID {cid})")
         text += f"\n{username}: {data['count']} комментариев, модель: {data['model']}"
     update.message.reply_text(text)
+
 
 def allow(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -125,8 +159,9 @@ def allow(update: Update, context: CallbackContext):
             whitelist_gpt4.add(chat_id)
             save_whitelist()
             update.message.reply_text(f"Канал {chat_id} добавлен в whitelist")
-        except:
+        except Exception:
             update.message.reply_text("Некорректный ID")
+
 
 def remove(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -136,22 +171,28 @@ def remove(update: Update, context: CallbackContext):
         return
     target = context.args[0]
     try:
-        chat_id = int(target) if not target.startswith("@") else username_to_id.get(target.lower())
+        chat_id = (
+            int(target)
+            if not target.startswith("@")
+            else username_to_id.get(target.lower())
+        )
         if chat_id and chat_id in whitelist_gpt4:
             whitelist_gpt4.remove(chat_id)
             save_whitelist()
             update.message.reply_text(f"Канал {target} удалён из whitelist")
         else:
             update.message.reply_text("Канал не найден или не в whitelist")
-    except:
+    except Exception:
         update.message.reply_text("Ошибка")
+
 
 def dump_whitelist(update: Update, context: CallbackContext):
     if update.message.from_user.id == OWNER_ID:
         try:
             update.message.reply_document(document=open("whitelist.json", "rb"))
-        except:
+        except Exception:
             update.message.reply_text("Файл не найден.")
+
 
 # === Регистрируем обработчики ===
 dispatcher.add_handler(CommandHandler("report", report))
@@ -161,10 +202,12 @@ dispatcher.add_handler(CommandHandler("remove", remove))
 dispatcher.add_handler(CommandHandler("dump_whitelist", dump_whitelist))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_post))
 
+
 # === Flask routes ===
 @app.route("/", methods=["GET"])
 def index():
     return "\u2705 Бот работает."
+
 
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
@@ -172,7 +215,8 @@ def webhook():
     dispatcher.process_update(update)
     return "ok"
 
+
 # === Запуск ===
-if __name__ == '__main__':
+if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host="0.0.0.0", port=5000)
