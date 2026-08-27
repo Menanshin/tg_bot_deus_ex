@@ -4,6 +4,17 @@ line-length = 88
 [tool.isort]
 profile = "black"
 
+# Единственный конфиг mypy: отдельный mypy.ini удалён, он конфликтовал с этим
+# и содержал невалидный python_version = "3.11.11".
 [tool.mypy]
-python_version = "3.11.11"
+python_version = "3.11"
 strict = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

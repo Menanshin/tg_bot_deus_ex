@@ -1,8 +1,20 @@
+"""Telegram-бот AI-комментатор: комментирует посты каналов через OpenAI.
+
+Пост в канале автоматически пересылается в связанный чат обсуждения; бот ловит
+эту пересылку и отвечает на неё — так ответ выглядит комментарием под постом.
+
+Запуск в проде — через gunicorn (см. Dockerfile), вебхук регистрируется вручную:
+    curl -F "url=https://<host>/<TELEGRAM_TOKEN>" \
+         -F "secret_token=$WEBHOOK_SECRET" \
+         https://api.telegram.org/bot$TELEGRAM_TOKEN/setWebhook
+"""
+
 from __future__ import annotations
- 
+
 import json
 import logging
 import os
+import tempfile
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -10,7 +22,7 @@ from io import BytesIO
 from pathlib import Path
 from queue import Queue
 from typing import Any, Deque, Dict, List, Optional, Set
- 
+
 from dotenv import load_dotenv
 from flask import Flask, Response, abort, request
 from openai import OpenAI
@@ -23,37 +35,37 @@ from telegram.ext import (
     Filters,
     MessageHandler,
 )
- 
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("commentator")
- 
- 
+
+
 # === Конфигурация ===
 def _require(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f"Переменная окружения {name} не задана")
     return value
- 
- 
+
+
 load_dotenv()
- 
+
 TELEGRAM_TOKEN = _require("TELEGRAM_TOKEN")
 OPENAI_API_KEY = _require("OPENAI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID") or 0)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 STATE_DIR = Path(os.getenv("STATE_DIR", "."))
 STATE_FILE = STATE_DIR / "state.json"
- 
+
 MODEL_DEFAULT = os.getenv("MODEL_DEFAULT", "gpt-4o-mini")
 MODEL_PREMIUM = os.getenv("MODEL_PREMIUM", "gpt-4o")
 MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "6000"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "500"))
 POST_LOG_LIMIT = int(os.getenv("POST_LOG_LIMIT", "5000"))
- 
+
 SYSTEM_PROMPT = (
     "Ты ИИ-комментатор. Комментируй посты точно и глубоко. "
     "Уточняй ошибки, предлагай улучшения, расшифровывай медиа по описанию. "
@@ -62,24 +74,28 @@ SYSTEM_PROMPT = (
     "Заверши каждый комментарий строкой: "
     "'Есть вопросы о моей работе? Обратитесь к моему создателю @menanshin'"
 )
- 
+
 bot = Bot(token=TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 # Реальная очередь + start() — апдейты обрабатываются в фоне, webhook отвечает сразу
 update_queue: "Queue[object]" = Queue()
 dispatcher = Dispatcher(bot, update_queue, workers=4, use_context=True)
- 
+
 app = Flask(__name__)
- 
- 
+
+# CallbackContext в PTB 13 — дженерик; алиас, чтобы mypy --strict был доволен
+Context = CallbackContext[Any, Any, Any]
+
+
 # === Состояние ===
-_lock = threading.RLock()
+_lock = threading.RLock()  # защищает структуры в памяти
+_io_lock = threading.Lock()  # сериализует запись файла состояния
 post_log: Deque[Dict[str, Any]] = deque(maxlen=POST_LOG_LIMIT)
 channel_stats: Dict[int, Dict[str, Any]] = {}
 whitelist_gpt4: Set[int] = set()
 username_to_id: Dict[str, int] = {}
- 
- 
+
+
 def load_state() -> None:
     """Восстановить состояние при старте. В оригинале эта функция отсутствовала."""
     if not STATE_FILE.exists():
@@ -99,27 +115,39 @@ def load_state() -> None:
             {int(k): v for k, v in data.get("channel_stats", {}).items()}
         )
     logger.info("Состояние загружено: %d канал(ов) в whitelist", len(whitelist_gpt4))
- 
- 
+
+
 def save_state() -> None:
-    """Атомарная запись, чтобы падение на середине не убило файл."""
-    tmp = STATE_FILE.with_suffix(".json.tmp")
+    """Атомарная запись, чтобы падение на середине не убило файл.
+
+    Временный файл уникален для каждого вызова, а сама запись сериализована
+    отдельным локом: иначе два воркера дерутся за один и тот же .tmp и второй
+    получает FileNotFoundError на os.replace.
+    """
+    with _lock:
+        payload = {
+            "gpt4_whitelist": sorted(whitelist_gpt4),
+            "username_map": dict(username_to_id),
+            "channel_stats": {str(k): v for k, v in channel_stats.items()},
+        }
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
     try:
-        with _lock:
-            payload = {
-                "gpt4_whitelist": sorted(whitelist_gpt4),
-                "username_map": dict(username_to_id),
-                "channel_stats": {str(k): v for k, v in channel_stats.items()},
-            }
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp.replace(STATE_FILE)
+        with _io_lock:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=STATE_DIR, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_name, STATE_FILE)
+            except BaseException:
+                Path(tmp_name).unlink(missing_ok=True)
+                raise
     except OSError:
         logger.exception("Ошибка при сохранении состояния")
- 
- 
+
+
 # === Вспомогательные функции ===
 def generate_ai_comment(post_text: str, use_gpt4: bool = False) -> Optional[str]:
     model = MODEL_PREMIUM if use_gpt4 else MODEL_DEFAULT
@@ -138,8 +166,8 @@ def generate_ai_comment(post_text: str, use_gpt4: bool = False) -> Optional[str]
         return None
     content = response.choices[0].message.content
     return content.strip() if content else None
- 
- 
+
+
 def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> List[str]:
     """Telegram отклоняет сообщения длиннее 4096 символов."""
     chunks: List[str] = []
@@ -153,23 +181,27 @@ def split_message(text: str, limit: int = MAX_MESSAGE_LENGTH) -> List[str]:
         chunks.append(text[:cut])
         text = text[cut:].lstrip("\n")
     return chunks
- 
- 
+
+
 def send_long(bot_: Bot, chat_id: int, text: str, reply_to: Optional[int]) -> None:
     for chunk in split_message(text):
         bot_.send_message(chat_id=chat_id, text=chunk, reply_to_message_id=reply_to)
         reply_to = None  # ответом помечаем только первый кусок
- 
- 
+
+
 def is_owner(update: Update) -> bool:
     user = update.effective_user
     return bool(OWNER_ID) and user is not None and user.id == OWNER_ID
- 
- 
+
+
 def record_post(
     chat_id: int, username: Optional[str], text: str, comment: str, model: str
 ) -> None:
     with _lock:
+        # Мапу @username -> chat_id пополняем и отсюда: пост в канале бот видит
+        # только если он там админ, а /allow @username нужен в любом случае.
+        if username:
+            username_to_id[f"@{username.lower()}"] = chat_id
         stats = channel_stats.setdefault(chat_id, {"count": 0, "model": model})
         stats["model"] = model
         stats["count"] += 1
@@ -184,10 +216,10 @@ def record_post(
             }
         )
     save_state()
- 
- 
+
+
 # === Обработчики ===
-def handle_channel_post(update: Update, context: CallbackContext) -> None:
+def handle_channel_post(update: Update, context: Context) -> None:
     """Пост в канале: запоминаем канал, ждём автопересылку в чат обсуждения."""
     message = update.channel_post
     if message is None:
@@ -198,34 +230,34 @@ def handle_channel_post(update: Update, context: CallbackContext) -> None:
             username_to_id[f"@{chat.username.lower()}"] = chat.id
         save_state()
     logger.info("Пост в канале %s (%s)", chat.username or chat.id, chat.id)
- 
- 
-def handle_discussion_post(update: Update, context: CallbackContext) -> None:
+
+
+def handle_discussion_post(update: Update, context: Context) -> None:
     """Автопересылка поста канала в чат обсуждения — сюда и пишем комментарий."""
     message = update.message
     if message is None or not message.is_automatic_forward:
         return
- 
+
     source = message.forward_from_chat
     if source is None:
         return
- 
+
     text = message.text or message.caption
     if not text:
         return
- 
+
     with _lock:
         use_gpt4 = source.id in whitelist_gpt4
     comment = generate_ai_comment(text, use_gpt4=use_gpt4)
     if comment is None:
         return
- 
+
     try:
         send_long(context.bot, message.chat.id, comment, message.message_id)
     except Exception:
         logger.exception("Не удалось отправить комментарий в %s", message.chat.id)
         return
- 
+
     record_post(
         chat_id=source.id,
         username=source.username,
@@ -233,9 +265,9 @@ def handle_discussion_post(update: Update, context: CallbackContext) -> None:
         comment=comment,
         model=MODEL_PREMIUM if use_gpt4 else MODEL_DEFAULT,
     )
- 
- 
-def report(update: Update, context: CallbackContext) -> None:
+
+
+def report(update: Update, context: Context) -> None:
     if not is_owner(update):
         return
     message = update.effective_message
@@ -252,9 +284,9 @@ def report(update: Update, context: CallbackContext) -> None:
     context.bot.send_document(
         chat_id=message.chat_id, document=BytesIO(payload), filename=filename
     )
- 
- 
-def status(update: Update, context: CallbackContext) -> None:
+
+
+def status(update: Update, context: Context) -> None:
     if not is_owner(update):
         return
     message = update.effective_message
@@ -271,8 +303,8 @@ def status(update: Update, context: CallbackContext) -> None:
             for cid, data in channel_stats.items()
         ]
     message.reply_text("Статистика по каналам:\n\n" + "\n".join(lines))
- 
- 
+
+
 def _resolve_target(target: str) -> Optional[int]:
     if target.startswith("@"):
         with _lock:
@@ -281,9 +313,9 @@ def _resolve_target(target: str) -> Optional[int]:
         return int(target)
     except ValueError:
         return None
- 
- 
-def allow(update: Update, context: CallbackContext) -> None:
+
+
+def allow(update: Update, context: Context) -> None:
     if not is_owner(update):
         return
     message = update.effective_message
@@ -300,9 +332,9 @@ def allow(update: Update, context: CallbackContext) -> None:
         whitelist_gpt4.add(chat_id)
     save_state()
     message.reply_text(f"Канал {context.args[0]} добавлен в whitelist")
- 
- 
-def remove(update: Update, context: CallbackContext) -> None:
+
+
+def remove(update: Update, context: Context) -> None:
     if not is_owner(update):
         return
     message = update.effective_message
@@ -314,16 +346,16 @@ def remove(update: Update, context: CallbackContext) -> None:
     chat_id = _resolve_target(context.args[0])
     with _lock:
         present = chat_id is not None and chat_id in whitelist_gpt4
-        if present:
-            whitelist_gpt4.discard(chat_id)  # type: ignore[arg-type]
+        if chat_id is not None and present:
+            whitelist_gpt4.discard(chat_id)
     if not present:
         message.reply_text("Канал не найден или не в whitelist")
         return
     save_state()
     message.reply_text(f"Канал {context.args[0]} удалён из whitelist")
- 
- 
-def dump_whitelist(update: Update, context: CallbackContext) -> None:
+
+
+def dump_whitelist(update: Update, context: Context) -> None:
     if not is_owner(update):
         return
     message = update.effective_message
@@ -336,12 +368,12 @@ def dump_whitelist(update: Update, context: CallbackContext) -> None:
     context.bot.send_document(
         chat_id=message.chat_id, document=BytesIO(payload), filename="whitelist.json"
     )
- 
- 
-def on_error(update: object, context: CallbackContext) -> None:
+
+
+def on_error(update: object, context: Context) -> None:
     logger.exception("Ошибка при обработке апдейта %s", update, exc_info=context.error)
- 
- 
+
+
 dispatcher.add_handler(CommandHandler("report", report))
 dispatcher.add_handler(CommandHandler("status", status))
 dispatcher.add_handler(CommandHandler("allow", allow))
@@ -352,17 +384,33 @@ dispatcher.add_handler(
     MessageHandler(Filters.update.message & ~Filters.command, handle_discussion_post)
 )
 dispatcher.add_error_handler(on_error)
- 
+
 load_state()
-dispatcher.start()
- 
- 
+# Dispatcher.start() — блокирующий цикл чтения из очереди, поэтому только в
+# фоновом потоке: в основном потоке он бы навсегда заблокировал старт Flask.
+threading.Thread(target=dispatcher.start, name="dispatcher", daemon=True).start()
+
+
 # === Flask routes ===
+_seen_updates: Deque[int] = deque(maxlen=1000)
+_seen_lock = threading.Lock()
+
+
+def _seen_before(update_id: int) -> bool:
+    """Telegram может доставить один апдейт повторно — не платим за него дважды."""
+    with _seen_lock:
+        if update_id in _seen_updates:
+            logger.info("Дубль апдейта %s пропущен", update_id)
+            return True
+        _seen_updates.append(update_id)
+    return False
+
+
 @app.get("/healthz")
 def healthz() -> Response:
     return Response("ok", mimetype="text/plain")
- 
- 
+
+
 @app.post(f"/{TELEGRAM_TOKEN}")
 def webhook() -> Response:
     if WEBHOOK_SECRET and (
@@ -373,10 +421,16 @@ def webhook() -> Response:
     if payload is None:
         abort(400)
     update = Update.de_json(payload, bot)
-    if update is not None:
+    if update is not None and not _seen_before(update.update_id):
         dispatcher.update_queue.put(update)  # отвечаем Telegram сразу
     return Response("ok", mimetype="text/plain")
- 
- 
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    # Только для локальной отладки — в проде приложение поднимает gunicorn
+    # (см. Dockerfile). Слушать все интерфейсы внутри контейнера нормально,
+    # поэтому bandit B104 здесь заглушён осознанно.
+    app.run(
+        host=os.getenv("HOST", "0.0.0.0"),  # nosec B104
+        port=int(os.getenv("PORT", "5000")),
+    )
