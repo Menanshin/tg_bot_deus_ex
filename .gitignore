@@ -173,5 +173,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-whitelist.json
+state.json
+*.tmp
+bandit_report.txt
 *.json
